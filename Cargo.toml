@@ -1,0 +1,12 @@
+[package]
+name = "flight-cli"
+version = "0.1.0"
+license = "MIT License"
+description = "A Command Line Interface for Apache Arrow Flight"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+arrow-flight = "18.0.0"
+clap = { version = "3.2.13", features = ["derive"] }
