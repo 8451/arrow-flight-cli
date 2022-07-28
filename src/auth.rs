@@ -1,3 +1,4 @@
+use crate::errors::CliError;
 use azure_identity::{authorization_code_flow, development};
 use oauth2::{AccessToken, ClientId, TokenResponse};
 use serde::{Deserialize, Serialize};
@@ -8,7 +9,6 @@ use tonic::metadata::MetadataValue;
 use tonic::service::Interceptor;
 use tonic::{Request, Status};
 use url::Url;
-use crate::errors::CliError;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum IdentityProvider {

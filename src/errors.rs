@@ -12,7 +12,7 @@ impl fmt::Display for CliError {
 }
 
 impl CliError {
-    pub fn new (message: String) -> CliError {
+    pub fn new(message: String) -> CliError {
         CliError(message)
     }
 }

@@ -63,7 +63,7 @@ enum Commands {
         #[clap(value_parser)]
         ticket: String,
     },
-    GetTicketInfo {
+    GetData {
         #[clap(value_parser)]
         query: String,
         #[clap(value_parser, short = 'p')]
@@ -173,7 +173,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
             Ok(())
         }
-        Commands::GetTicketInfo { query, file_path } => {
+        Commands::GetData { query, file_path } => {
             let mut client = connect_to_flight_server(&cfg).await?;
             let fd = FlightDescriptor::new_path(vec![query.to_owned()]);
             println!("Flight Descriptor: {:?}", fd);
