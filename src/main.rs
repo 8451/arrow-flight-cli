@@ -7,13 +7,16 @@ use std::fs::File;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use arrow::csv::WriterBuilder;
+use arrow::csv::{Writer, WriterBuilder};
 use arrow::datatypes::Schema;
+
 use arrow_flight::flight_service_client::FlightServiceClient;
-use arrow_flight::utils::flight_data_to_arrow_batch;
+use arrow_flight::utils::{flight_data_to_arrow_batch};
 use arrow_flight::{Criteria, FlightDescriptor, Ticket};
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
+use parquet::arrow::{ArrowWriter};
+use parquet::file::properties::WriterProperties;
 use Box;
 
 use crate::auth::{azure_authorization, IdentityProvider, OAuth2Interceptor};
@@ -55,19 +58,24 @@ enum Commands {
         #[clap(value_parser)]
         query: String,
     },
+    /// UNIMPLEMENTED: Get Schema of a table
     GetSchema {
         #[clap(value_parser)]
         query: String,
     },
+    /// Get data for a specific Flight Ticket
     DoGet {
         #[clap(value_parser)]
         ticket: String,
     },
+    /// Get the data for a path
     GetData {
         #[clap(value_parser)]
         query: String,
-        #[clap(value_parser, short = 'p')]
+        #[clap(value_parser, short = 'f')]
         file_path: String,
+        #[clap(short = 'p', long = "parquet", action)]
+        save_as_parquet: bool,
     },
 }
 
@@ -173,13 +181,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
             Ok(())
         }
-        Commands::GetData { query, file_path } => {
+        Commands::GetData {
+            query,
+            file_path,
+            save_as_parquet,
+        } => {
             let mut client = connect_to_flight_server(&cfg).await?;
             let fd = FlightDescriptor::new_path(vec![query.to_owned()]);
             println!("Flight Descriptor: {:?}", fd);
 
-            let file = File::create(file_path)?;
-            let mut csv_writer = WriterBuilder::new().build(file);
+            let mut csv_writer: Option<Writer<File>> = if !save_as_parquet {
+                let file = File::create(file_path)?;
+                Some(WriterBuilder::new().build(file))
+            } else {
+                None
+            };
 
             let flight_info = client.get_flight_info(fd).await?.into_inner();
             for endpoint in flight_info.endpoint {
@@ -191,6 +207,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         Arc::new(Schema::try_from(&schema)?)
                     } else {
                         break;
+                    };
+
+                    let mut parquet_writer: Option<ArrowWriter<File>> = if *save_as_parquet {
+                        let props = WriterProperties::builder().build();
+                        let file = File::create(file_path)?;
+                        Some(ArrowWriter::try_new(file, schema.clone(), Some(props))?)
+                    } else {
+                        None
                     };
 
                     let mut results = vec![];
@@ -205,7 +229,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     }
 
                     for batch in results {
-                        csv_writer.write(&batch)?;
+                        // This could be a place for generics? I don't like this.
+                        if let Some(ref mut writer) = csv_writer {
+                            writer.write(&batch)?;
+                        } else if let Some(ref mut writer) = parquet_writer {
+                            writer.write(&batch)?;
+                        }
+                    }
+                    if let Some(writer) = parquet_writer {
+                        writer.close()?;
                     }
                 }
             }

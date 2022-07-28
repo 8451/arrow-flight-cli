@@ -17,6 +17,7 @@ confy = "0.4.0"
 futures = "0.3.21"
 http = "0.2.8"
 oauth2 = "4.2.3"
+parquet = "19.0.0"
 serde = { version = "1.0.140", features = ["derive"] }
 tokio = { version = "1.20.0", features = ["tokio-macros", "net"] }
 tonic = "0.7.2"
