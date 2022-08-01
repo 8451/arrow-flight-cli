@@ -159,15 +159,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!("Flight info: {}", flight_info.into_inner());
             Ok(())
         }
-        Commands::GetSchema { query: _query } => {
-            // TODO: Fix this. It's broken
-            // let mut client = connect_to_flight_server(&cfg).await?;
-            // let fd = FlightDescriptor::new_path(vec!(query.to_owned()));
-            // let flight_info = client.get_flight_info(fd).await?.into_inner();
-            // let schema = flight_info.schema;
-            // let schema = schema_from_bytes(&*schema);
-            // println!("Schema: {:?}", schema);
-            println!("Not currently implemented");
+        Commands::GetSchema { query } => {
+            let mut client = connect_to_flight_server(&cfg).await?;
+            let fd = FlightDescriptor::new_path(vec!(query.to_owned()));
+            let flight_info = client.get_flight_info(fd).await?.into_inner();
+            let schema = Schema::try_from(flight_info.clone())?;
+            println!("Schema: {:?}", schema);
             Ok(())
         }
         Commands::DoGet { ticket } => {
@@ -190,6 +187,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let fd = FlightDescriptor::new_path(vec![query.to_owned()]);
             println!("Flight Descriptor: {:?}", fd);
 
+            let flight_info = client.get_flight_info(fd).await?.into_inner();
+            let schema = Schema::try_from(flight_info.clone())?;
+
             let mut csv_writer: Option<Writer<File>> = if !save_as_parquet {
                 let file = File::create(file_path)?;
                 Some(WriterBuilder::new().build(file))
@@ -197,7 +197,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 None
             };
 
-            let flight_info = client.get_flight_info(fd).await?.into_inner();
+            let mut parquet_writer: Option<ArrowWriter<File>> = if *save_as_parquet { // FIX: This won't work because it will overwrite for each endpoint
+                let props = WriterProperties::builder().build();
+                let file = File::create(file_path)?;
+                Some(ArrowWriter::try_new(file, schema.into(), Some(props))?)
+            } else {
+                None
+            };
+
+            println!("Found {} endpoints", flight_info.endpoint.len());
+
+            let stdout = io::stdout();
+            let mut handle = io::BufWriter::new(stdout.lock());
+
+            let mut endpoint_count = 0;
             for endpoint in flight_info.endpoint {
                 let ticket = endpoint.ticket;
                 if let Some(ticket) = ticket {
@@ -208,15 +221,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     } else {
                         break;
                     };
-
-                    let mut parquet_writer: Option<ArrowWriter<File>> = if *save_as_parquet {
-                        let props = WriterProperties::builder().build();
-                        let file = File::create(file_path)?;
-                        Some(ArrowWriter::try_new(file, schema.clone(), Some(props))?)
-                    } else {
-                        None
-                    };
-
+                    let mut batch_count: u64 = 0;
                     let mut results = vec![];
                     let dictionaries_by_field = HashMap::new();
                     while let Some(flight_data) = stream.message().await? {
@@ -226,6 +231,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             &dictionaries_by_field,
                         )?;
                         results.push(record_batch);
+
+                        batch_count = batch_count + 1;
+                        write!(handle, "\rProcessed {} batches", batch_count)?;
+                        handle.flush()?; // After testing, it was found that the performance impact of flushing every time was negligible/within margin of error
                     }
 
                     for batch in results {
@@ -236,11 +245,40 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             writer.write(&batch)?;
                         }
                     }
-                    if let Some(writer) = parquet_writer {
-                        writer.close()?;
-                    }
+                    write!(handle, "\nCompleted batches for endpoint {}", endpoint_count)?;
+                    endpoint_count = endpoint_count + 1;
                 }
             }
+            if let Some(writer) = parquet_writer {
+                writer.close()?;
+            }
+            Ok(())
+        }
+        Commands::SendData {
+            path: _,
+            parquet_path: _,
+        } => {
+            // let mut client = connect_to_flight_server(&cfg).await?;
+            // let file = tokio::fs::File::open(parquet_path).await?;
+            // let builder = ParquetRecordBatchStreamBuilder::new(file)
+            //     .await?;
+            //
+            // let file_metadata = builder.metadata().file_metadata();
+            // let mask = ProjectionMask::roots(file_metadata.schema_descr(), [1,2,6]);
+            //
+            // let stream = builder.with_projection(mask).build()?;
+            //
+            // stream.
+            //
+            // for record_batch_result in record_batch_reader {
+            //     let record_batch = record_batch_result?;
+            //     let ipc_write_options = IpcWriteOptions::try_new(0, false, MetadataVersion::V5)?;
+            //     let flight_data = flight_data_from_arrow_batch(&record_batch, &ipc_write_options);
+            //     let mut put_result = client.do_put(flight_data).await?.into_inner();
+            //     while let Some(result) = put_result.next().await {
+            //         println!("Put Result: {:?}", result?)
+            //     }
+            // }
             Ok(())
         }
     }
