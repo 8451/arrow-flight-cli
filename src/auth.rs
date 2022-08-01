@@ -41,7 +41,6 @@ impl FromStr for IdentityProvider {
 }
 
 pub async fn azure_authorization() -> Result<AccessToken, Box<dyn Error>> {
-    // TODO: Implement Refresh token so we don't need to ask to open browser every time.
     let client_id = ClientId::new(
         env::var("OAUTH_CLIENT_ID").expect("Missing CLIENT_ID environment variable."),
     );
@@ -51,7 +50,7 @@ pub async fn azure_authorization() -> Result<AccessToken, Box<dyn Error>> {
         None,
         &tenant_id,
         Url::parse("http://localhost:47471")?,
-        " offline_access",
+        "",
     );
     println!("\nOpen this URL in a browser:\n{}", c.authorize_url);
 
@@ -60,7 +59,6 @@ pub async fn azure_authorization() -> Result<AccessToken, Box<dyn Error>> {
 
     // Exchange the token with one that can be used for authorization
     let token = c.exchange(code).await?;
-    println!("Refresh token: {:?}", token.refresh_token());
     Ok(token.access_token().to_owned())
 }
 
