@@ -280,7 +280,7 @@ async fn connect_to_flight_server(
         IdentityProvider::Azure => azure_authorization().await?,
         IdentityProvider::Google => return Err(Box::try_from(Status::unimplemented("Google Auth not yet implemented"))?),
         IdentityProvider::Github => return Err(Box::try_from(Status::unimplemented("Github Auth not yet implemented"))?),
-        IdentityProvider::None => AccessToken::new("".parse().unwrap())
+        IdentityProvider::None => AccessToken::new("".parse()?)
     };
     let channel = Endpoint::from_str(&*config.address)?.connect().await?;
     Ok(FlightServiceClient::with_interceptor(
