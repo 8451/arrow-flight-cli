@@ -14,14 +14,18 @@ use arrow_flight::flight_service_client::FlightServiceClient;
 use arrow_flight::utils::{flight_data_to_arrow_batch};
 use arrow_flight::{Criteria, FlightDescriptor, Ticket};
 use clap::{Parser, Subcommand};
-use futures::StreamExt;
+use futures::{StreamExt};
 use parquet::arrow::{ArrowWriter};
 use parquet::file::properties::WriterProperties;
 use Box;
+use std::io;
+use std::io::Write;
+use oauth2::AccessToken;
 
 use crate::auth::{azure_authorization, IdentityProvider, OAuth2Interceptor};
 use serde::{Deserialize, Serialize};
 use tonic::codegen::InterceptedService;
+use tonic::Status;
 use tonic::transport::{Channel, Endpoint};
 
 #[derive(Parser)]
@@ -76,6 +80,13 @@ enum Commands {
         file_path: String,
         #[clap(short = 'p', long = "parquet", action)]
         save_as_parquet: bool,
+    },
+    /// Send data through DoPut (requires parquet file)
+    SendData {
+        #[clap(value_parser, short = 'q')]
+        path: String,
+        #[clap(value_parser, short = 'f')]
+        parquet_path: String,
     },
 }
 
@@ -196,7 +207,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             } else {
                 None
             };
-
             let mut parquet_writer: Option<ArrowWriter<File>> = if *save_as_parquet { // FIX: This won't work because it will overwrite for each endpoint
                 let props = WriterProperties::builder().build();
                 let file = File::create(file_path)?;
@@ -258,47 +268,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
             path: _,
             parquet_path: _,
         } => {
-            // let mut client = connect_to_flight_server(&cfg).await?;
-            // let file = tokio::fs::File::open(parquet_path).await?;
-            // let builder = ParquetRecordBatchStreamBuilder::new(file)
-            //     .await?;
-            //
-            // let file_metadata = builder.metadata().file_metadata();
-            // let mask = ProjectionMask::roots(file_metadata.schema_descr(), [1,2,6]);
-            //
-            // let stream = builder.with_projection(mask).build()?;
-            //
-            // stream.
-            //
-            // for record_batch_result in record_batch_reader {
-            //     let record_batch = record_batch_result?;
-            //     let ipc_write_options = IpcWriteOptions::try_new(0, false, MetadataVersion::V5)?;
-            //     let flight_data = flight_data_from_arrow_batch(&record_batch, &ipc_write_options);
-            //     let mut put_result = client.do_put(flight_data).await?.into_inner();
-            //     while let Some(result) = put_result.next().await {
-            //         println!("Put Result: {:?}", result?)
-            //     }
-            // }
-            Ok(())
+            Err(Box::try_from(Status::unimplemented("Send Data not yet implemented"))?)
         }
     }
 }
 
-// TODO: Implement this function if OAuth is set to None
-// async fn connect_to_flight_server(config: &ConnectionConfig) -> Result<FlightServiceClient<Channel>, Box<dyn Error>> {
-//     let address = http::Uri::from_str(&config.address)?;
-//     Ok(futures::executor::block_on(FlightServiceClient::connect(address))?)
-// }
-
 async fn connect_to_flight_server(
     config: &ConnectionConfig,
 ) -> Result<FlightServiceClient<InterceptedService<Channel, OAuth2Interceptor>>, Box<dyn Error>> {
-    let token = azure_authorization().await?;
+    let token = match config.identity_provider {
+        IdentityProvider::Azure => azure_authorization().await?,
+        IdentityProvider::Google => return Err(Box::try_from(Status::unimplemented("Google Auth not yet implemented"))?),
+        IdentityProvider::Github => return Err(Box::try_from(Status::unimplemented("Github Auth not yet implemented"))?),
+        IdentityProvider::None => AccessToken::new("".parse().unwrap())
+    };
     let channel = Endpoint::from_str(&*config.address)?.connect().await?;
     Ok(FlightServiceClient::with_interceptor(
         channel,
         OAuth2Interceptor {
             access_token: token.secret().clone(),
-        },
-    )) // This is nasty, but should be fine as this will only be needed once.
+        }
+    ))
 }

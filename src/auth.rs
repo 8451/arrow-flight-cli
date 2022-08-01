@@ -31,6 +31,7 @@ impl FromStr for IdentityProvider {
             "azure" => Ok(IdentityProvider::Azure),
             "github" => Ok(IdentityProvider::Github),
             "google" => Ok(IdentityProvider::Google),
+            "none" => Ok(IdentityProvider::None),
             _ => {
                 eprintln!("Invalid Identity Provider: {}", s);
                 Err(CliError::new("Invalid Identity Provider".to_string()))
@@ -50,7 +51,7 @@ pub async fn azure_authorization() -> Result<AccessToken, Box<dyn Error>> {
         None,
         &tenant_id,
         Url::parse("http://localhost:47471")?,
-        "",
+        " offline_access",
     );
     println!("\nOpen this URL in a browser:\n{}", c.authorize_url);
 
@@ -69,10 +70,12 @@ pub struct OAuth2Interceptor {
 
 impl Interceptor for OAuth2Interceptor {
     fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
-        let new_token: MetadataValue<_> = format!("Bearer {}", self.access_token).parse().unwrap();
-        request
-            .metadata_mut()
-            .insert("authorization", new_token.clone());
+        if self.access_token != "" {
+            let new_token: MetadataValue<_> = format!("Bearer {}", self.access_token).parse().unwrap();
+            request
+                .metadata_mut()
+                .insert("authorization", new_token.clone());
+        }
         Ok(request)
     }
 }
