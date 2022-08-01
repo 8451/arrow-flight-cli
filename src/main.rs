@@ -46,28 +46,28 @@ enum Commands {
         #[clap(value_parser)]
         server_address: Option<String>,
     },
-    ///
+    /// Set OAuth Provider (Azure, Github, Google, Default: None)
     SetOauthProvider {
-        #[clap(value_parser)]
-        provider: String,
+        #[clap(value_enum)]
+        provider: IdentityProvider,
     },
     /// Get the current server in the config
     GetServer,
     /// Test the connection of the current flight server
     TestConnection,
-    /// List all flights
+    /// DEBUG: List all flights
     ListFlights,
     /// Get flight info of input query
     GetFlightInfo {
         #[clap(value_parser)]
         query: String,
     },
-    /// UNIMPLEMENTED: Get Schema of a table
+    /// DEBUG: Get Schema of a path
     GetSchema {
         #[clap(value_parser)]
         query: String,
     },
-    /// Get data for a specific Flight Ticket
+    /// DEBUG: Get data for a specific Flight Ticket
     DoGet {
         #[clap(value_parser)]
         ticket: String,
@@ -81,7 +81,7 @@ enum Commands {
         #[clap(short = 'p', long = "parquet", action)]
         save_as_parquet: bool,
     },
-    /// Send data through DoPut (requires parquet file)
+    /// UNIMPLEMENTED: Send data through DoPut (requires parquet file)
     SendData {
         #[clap(value_parser, short = 'q')]
         path: String,
@@ -135,10 +135,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::SetOauthProvider { provider } => {
             let new_cfg = ConnectionConfig {
                 address: cfg.address,
-                identity_provider: IdentityProvider::from_str(provider)?,
+                identity_provider: provider.to_owned()
             };
             confy::store_path("/Users/******/Desktop/flight-cli", &new_cfg)?;
-            println!("Set OAuth Provider to {}!", provider);
+            println!("Set OAuth Provider to {:?}!", provider);
             Ok(())
         }
         Commands::GetServer => {

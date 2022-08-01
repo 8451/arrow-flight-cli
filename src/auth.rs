@@ -10,7 +10,7 @@ use tonic::service::Interceptor;
 use tonic::{Request, Status};
 use url::Url;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, clap::ValueEnum, Clone)]
 pub enum IdentityProvider {
     /// Azure Active Directory
     Azure,
