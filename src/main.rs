@@ -21,6 +21,7 @@ use Box;
 use std::io;
 use std::io::Write;
 use oauth2::AccessToken;
+use parquet::basic::Compression;
 
 use crate::auth::{azure_authorization, IdentityProvider, OAuth2Interceptor};
 use serde::{Deserialize, Serialize};
@@ -208,7 +209,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 None
             };
             let mut parquet_writer: Option<ArrowWriter<File>> = if *save_as_parquet { // FIX: This won't work because it will overwrite for each endpoint
-                let props = WriterProperties::builder().build();
+                let props = WriterProperties::builder()
+                    .set_compression(Compression::SNAPPY)
+                    .build();
                 let file = File::create(file_path)?;
                 Some(ArrowWriter::try_new(file, schema.into(), Some(props))?)
             } else {
@@ -218,7 +221,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!("Found {} endpoints", flight_info.endpoint.len());
 
             let stdout = io::stdout();
-            let mut handle = io::BufWriter::new(stdout.lock());
+            let mut handle = stdout.lock();
 
             let mut endpoint_count = 0;
             for endpoint in flight_info.endpoint {
@@ -244,7 +247,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                         batch_count = batch_count + 1;
                         write!(handle, "\rProcessed {} batches", batch_count)?;
-                        handle.flush()?; // After testing, it was found that the performance impact of flushing every time was negligible/within margin of error
                     }
 
                     for batch in results {
@@ -255,7 +257,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             writer.write(&batch)?;
                         }
                     }
-                    write!(handle, "\nCompleted batches for endpoint {}", endpoint_count)?;
+                    write!(handle, "\nCompleted batches for endpoint {}\n", endpoint_count)?;
                     endpoint_count = endpoint_count + 1;
                 }
             }
