@@ -27,7 +27,7 @@ use crate::auth::{azure_authorization, IdentityProvider, OAuth2Interceptor};
 use serde::{Deserialize, Serialize};
 use tonic::codegen::InterceptedService;
 use tonic::Status;
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
@@ -79,8 +79,10 @@ enum Commands {
         query: String,
         #[clap(value_parser, short = 'f')]
         file_path: String,
-        #[clap(short = 'p', long = "parquet", action)]
+        #[clap(short = 'o', long = "parquet", help = "Save incoming data as a parquet")]
         save_as_parquet: bool,
+        #[clap(short = 'q', long = "query", help = "Use an SQL Query instead of a table name")]
+        is_cmd: bool
     },
     /// UNIMPLEMENTED: Send data through DoPut (requires parquet file)
     SendData {
@@ -194,21 +196,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
             query,
             file_path,
             save_as_parquet,
+            is_cmd
         } => {
             let mut client = connect_to_flight_server(&cfg).await?;
-            let fd = FlightDescriptor::new_path(vec![query.to_owned()]);
+            let fd = match *is_cmd {
+                true => FlightDescriptor::new_path(vec![query.to_owned()]),
+                false => FlightDescriptor::new_cmd(query.to_owned().into_bytes())
+            };
             println!("Flight Descriptor: {:?}", fd);
 
             let flight_info = client.get_flight_info(fd).await?.into_inner();
             let schema = Schema::try_from(flight_info.clone())?;
 
-            let mut csv_writer: Option<Writer<File>> = if !save_as_parquet {
+            let mut csv_writer: Option<Writer<File>> = if !*save_as_parquet {
                 let file = File::create(file_path)?;
                 Some(WriterBuilder::new().build(file))
             } else {
                 None
             };
-            let mut parquet_writer: Option<ArrowWriter<File>> = if *save_as_parquet { // FIX: This won't work because it will overwrite for each endpoint
+            let mut parquet_writer: Option<ArrowWriter<File>> = if *save_as_parquet {
                 let props = WriterProperties::builder()
                     .set_compression(Compression::SNAPPY)
                     .build();
@@ -235,7 +241,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         break;
                     };
                     let mut batch_count: u64 = 0;
-                    let mut results = vec![];
                     let dictionaries_by_field = HashMap::new();
                     while let Some(flight_data) = stream.message().await? {
                         let record_batch = flight_data_to_arrow_batch(
@@ -243,20 +248,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             schema.clone(),
                             &dictionaries_by_field,
                         )?;
-                        results.push(record_batch);
 
                         batch_count = batch_count + 1;
                         write!(handle, "\rProcessed {} batches", batch_count)?;
-                    }
 
-                    for batch in results {
-                        // This could be a place for generics? I don't like this.
                         if let Some(ref mut writer) = csv_writer {
-                            writer.write(&batch)?;
+                            writer.write(&record_batch)?
                         } else if let Some(ref mut writer) = parquet_writer {
-                            writer.write(&batch)?;
+                            writer.write(&record_batch)?
                         }
-                    }
+                    };
+
                     write!(handle, "\nCompleted batches for endpoint {}\n", endpoint_count)?;
                     endpoint_count = endpoint_count + 1;
                 }
@@ -284,7 +286,7 @@ async fn connect_to_flight_server(
         IdentityProvider::Github => return Err(Box::try_from(Status::unimplemented("Github Auth not yet implemented"))?),
         IdentityProvider::None => AccessToken::new("".parse()?)
     };
-    let channel = Endpoint::from_str(&*config.address)?.connect().await?;
+    let channel = Endpoint::from_str(&*config.address)?.tls_config(ClientTlsConfig::new())?.connect().await?;
     Ok(FlightServiceClient::with_interceptor(
         channel,
         OAuth2Interceptor {
