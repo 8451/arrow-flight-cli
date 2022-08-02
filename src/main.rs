@@ -109,7 +109,7 @@ impl Default for ConnectionConfig {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
-    let cfg: ConnectionConfig = confy::load_path("/Users/******/Desktop/flight-cli")?;
+    let cfg: ConnectionConfig = confy::load("flight-cli")?;
 
     match &cli.command {
         Commands::SetServer { server_address } => {
@@ -123,7 +123,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     let client = connect_to_flight_server(&new_cfg).await;
                     match client {
                         Ok(_) => {
-                            confy::store_path("/Users/******/Desktop/flight-cli", &new_cfg)?;
+                            confy::store("flight-cli", &new_cfg)?;
                             println!("Changed flight server to {}", new_cfg.address);
                             Ok(())
                         }
@@ -138,12 +138,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 address: cfg.address,
                 identity_provider: provider.to_owned()
             };
-            confy::store_path("/Users/******/Desktop/flight-cli", &new_cfg)?;
+            confy::store("flight-cli", &new_cfg)?;
             println!("Set OAuth Provider to {:?}!", provider);
             Ok(())
         }
         Commands::GetServer => {
-            println!("Currently saved server is: {:?}", &cfg);
+            println!("Currently saved server is: {}", &cfg.address);
             Ok(())
         }
         Commands::TestConnection => {
