@@ -11,23 +11,22 @@ use arrow::csv::{Writer, WriterBuilder};
 use arrow::datatypes::Schema;
 
 use arrow_flight::flight_service_client::FlightServiceClient;
-use arrow_flight::utils::{flight_data_to_arrow_batch};
+use arrow_flight::utils::flight_data_to_arrow_batch;
 use arrow_flight::{Criteria, FlightDescriptor, Ticket};
 use clap::{Parser, Subcommand};
-use futures::{StreamExt};
-use parquet::arrow::{ArrowWriter};
+use futures::StreamExt;
+use oauth2::AccessToken;
+use parquet::arrow::ArrowWriter;
+use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
-use Box;
 use std::io;
 use std::io::Write;
-use oauth2::AccessToken;
-use parquet::basic::Compression;
 
 use crate::auth::{azure_authorization, IdentityProvider, OAuth2Interceptor};
 use serde::{Deserialize, Serialize};
 use tonic::codegen::InterceptedService;
-use tonic::Status;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
+use tonic::Status;
 
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
@@ -49,6 +48,10 @@ pub struct Cli {
     #[clap(long = "provider", short = 'i', value_enum)]
     identity_provider: Option<IdentityProvider>,
 
+    /// Provide OAuth2 Scope instead of using config value
+    #[clap(long = "scope", short = 'c')]
+    scope: Option<String>,
+
     #[clap(subcommand)]
     command: Commands,
 }
@@ -60,15 +63,17 @@ enum Commands {
         #[clap(value_parser)]
         server_address: String,
         #[clap(long = "tls", short = 't')]
-        tls: bool
+        tls: bool,
     },
     /// Set OAuth Provider (Azure, Github, Google, Default: None)
     SetOauthProvider {
         #[clap(value_enum)]
         provider: IdentityProvider,
+        #[clap(value_parser)]
+        scope: String,
     },
     /// Get the current server in the config
-    GetServer,
+    CurrentServer,
     /// Test the connection of the current flight server
     TestConnection,
     /// DEBUG: List all flights
@@ -94,10 +99,18 @@ enum Commands {
         query: String,
         #[clap(value_parser, short = 'f')]
         file_path: String,
-        #[clap(short = 'o', long = "parquet", help = "Save incoming data as a parquet")]
+        #[clap(
+            short = 'o',
+            long = "parquet",
+            help = "Save incoming data as a parquet"
+        )]
         save_as_parquet: bool,
-        #[clap(short = 'q', long = "query", help = "Use an SQL Query instead of a table name")]
-        is_cmd: bool
+        #[clap(
+            short = 'q',
+            long = "query",
+            help = "Use an SQL Query instead of a table name"
+        )]
+        is_cmd: bool,
     },
     /// UNIMPLEMENTED: Send data through DoPut (requires parquet file)
     SendData {
@@ -112,7 +125,8 @@ enum Commands {
 pub struct ConnectionConfig {
     address: String,
     identity_provider: IdentityProvider,
-    tls: bool
+    scope: String,
+    tls: bool,
 }
 
 impl Default for ConnectionConfig {
@@ -120,7 +134,8 @@ impl Default for ConnectionConfig {
         Self {
             address: "".into(),
             identity_provider: IdentityProvider::None,
-            tls: false
+            scope: "".into(),
+            tls: false,
         }
     }
 }
@@ -134,12 +149,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let cfg = merge_cfg_and_options(cfg, &cli);
 
     match &cli.command {
-        Commands::SetServer { server_address, tls } => {
+        Commands::SetServer {
+            server_address,
+            tls,
+        } => {
             let tls = *tls || *tls_flag; // User can use global option or subcommand flag to set to TLS
             let new_cfg = ConnectionConfig {
                 address: server_address.to_owned(),
                 identity_provider: cfg.identity_provider,
-                tls
+                scope: cfg.scope,
+                tls,
             };
             // Test server connection before changing config
             let client = connect_to_flight_server(&new_cfg).await;
@@ -149,20 +168,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     println!("Changed flight server to {}", new_cfg.address);
                     Ok(())
                 }
-                Err(e) => Err(e.into()),
+                Err(e) => Err(e),
             }
-        },
-        Commands::SetOauthProvider { provider } => {
+        }
+        Commands::SetOauthProvider { provider, scope } => {
             let new_cfg = ConnectionConfig {
                 address: cfg.address,
                 identity_provider: provider.to_owned(),
-                tls: cfg.tls
+                scope: scope.to_owned(),
+                tls: cfg.tls,
             };
             confy::store("flight-cli", &new_cfg)?;
-            println!("Set OAuth Provider to {:?}!", provider);
+            println!(
+                "Set OAuth Provider to {:?} with scope \"{}\"",
+                provider, scope
+            );
             Ok(())
         }
-        Commands::GetServer => {
+        Commands::CurrentServer => {
             println!("Currently saved server is: {}", &cfg.address);
             Ok(())
         }
@@ -193,9 +216,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         Commands::GetSchema { query } => {
             let mut client = connect_to_flight_server(&cfg).await?;
-            let fd = FlightDescriptor::new_path(vec!(query.to_owned()));
+            let fd = FlightDescriptor::new_path(vec![query.to_owned()]);
             let flight_info = client.get_flight_info(fd).await?.into_inner();
-            let schema = Schema::try_from(flight_info.clone())?;
+            let schema = Schema::try_from(flight_info)?;
             println!("Schema: {:?}", schema);
             Ok(())
         }
@@ -214,12 +237,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             query,
             file_path,
             save_as_parquet,
-            is_cmd
+            is_cmd,
         } => {
             let mut client = connect_to_flight_server(&cfg).await?;
             let fd = match *is_cmd {
                 true => FlightDescriptor::new_cmd(query.to_owned().into_bytes()),
-                false => FlightDescriptor::new_path(vec![query.to_owned()])
+                false => FlightDescriptor::new_path(vec![query.to_owned()]),
             };
             println!("Flight Descriptor: {:?}", fd);
 
@@ -267,7 +290,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             &dictionaries_by_field,
                         )?;
 
-                        batch_count = batch_count + 1;
+                        batch_count += 1;
                         write!(handle, "\rProcessed {} batches", batch_count)?;
 
                         if let Some(ref mut writer) = csv_writer {
@@ -275,10 +298,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         } else if let Some(ref mut writer) = parquet_writer {
                             writer.write(&record_batch)?
                         }
-                    };
+                    }
 
-                    write!(handle, "\nCompleted batches for endpoint {}\n", endpoint_count)?;
-                    endpoint_count = endpoint_count + 1;
+                    write!(
+                        handle,
+                        "\nCompleted batches for endpoint {}\n",
+                        endpoint_count
+                    )?;
+                    endpoint_count += 1;
                 }
             }
             if let Some(writer) = parquet_writer {
@@ -289,23 +316,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::SendData {
             path: _,
             parquet_path: _,
-        } => {
-            Err(Box::try_from(Status::unimplemented("Send Data not yet implemented"))?)
-        }
+        } => Err(Box::try_from(Status::unimplemented(
+            "Send Data not yet implemented",
+        ))?),
     }
 }
 
 async fn connect_to_flight_server(
-    config: &ConnectionConfig
+    config: &ConnectionConfig,
 ) -> Result<FlightServiceClient<InterceptedService<Channel, OAuth2Interceptor>>, Box<dyn Error>> {
     let token = match config.identity_provider {
-        IdentityProvider::Azure => azure_authorization().await?,
-        IdentityProvider::Google => return Err(Box::try_from(Status::unimplemented("Google Auth not yet implemented"))?),
-        IdentityProvider::Github => return Err(Box::try_from(Status::unimplemented("Github Auth not yet implemented"))?),
-        IdentityProvider::None => AccessToken::new("".parse()?)
+        IdentityProvider::Azure => azure_authorization(config.scope.to_owned()).await?,
+        IdentityProvider::Google => {
+            return Err(Box::try_from(Status::unimplemented(
+                "Google Auth not yet implemented",
+            ))?)
+        }
+        IdentityProvider::Github => {
+            return Err(Box::try_from(Status::unimplemented(
+                "Github Auth not yet implemented",
+            ))?)
+        }
+        IdentityProvider::None => AccessToken::new("".parse()?),
     };
     let channel = if config.tls {
-        Endpoint::from_str(&*config.address)?.tls_config(ClientTlsConfig::new())?.connect().await?
+        Endpoint::from_str(&*config.address)?
+            .tls_config(ClientTlsConfig::new())?
+            .connect()
+            .await?
     } else {
         Endpoint::from_str(&*config.address)?.connect().await?
     };
@@ -313,7 +351,7 @@ async fn connect_to_flight_server(
         channel,
         OAuth2Interceptor {
             access_token: token.secret().clone(),
-        }
+        },
     ))
 }
 
@@ -321,20 +359,22 @@ async fn connect_to_flight_server(
 fn merge_cfg_and_options(config: ConnectionConfig, cli: &Cli) -> ConnectionConfig {
     let address = match &cli.address {
         Some(address) => address.to_owned(),
-        None => config.address.to_owned()
+        None => config.address.to_owned(),
     };
     let identity_provider = match &cli.identity_provider {
         Some(provider) => provider.to_owned(),
-        None => config.identity_provider.to_owned()
+        None => config.identity_provider.to_owned(),
     };
-    let tls = if config.tls != cli.tls {
-        cli.tls
-    } else {
-        config.tls
+    let scope = match &cli.scope {
+        Some(scope) => scope.to_owned(),
+        None => config.scope.to_owned(),
     };
+    // TLS will always be true if CLI option set, but could be true or false if not set
+    let tls = if cli.tls { true } else { config.tls };
     ConnectionConfig {
         address,
         identity_provider,
-        tls
+        scope,
+        tls,
     }
 }

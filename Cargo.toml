@@ -12,14 +12,14 @@ arrow = "19.0.0"
 arrow-flight = "19.0.0"
 azure_core = "0.3.0"
 azure_identity = "0.4.0"
+chrono = "0.4.20"
 clap = { version = "3.2.13", features = ["derive"] }
 confy = "0.4.0"
 futures = "0.3.21"
 http = "0.2.8"
 oauth2 = "4.2.3"
 parquet = { version = "19.0.0", features = ["async"] }
-prost = "0.10.4"
 serde = { version = "1.0.140", features = ["derive"] }
 tokio = { version = "1.20.0", features = ["tokio-macros", "net"] }
-tonic = { version = "0.7.2", features = ["tls", "tls-roots"] }
+tonic = { version = "0.7.2", features = ["tls", "tls-roots"] } # TODO: Update this to 0.8.0 when arrow updates to 20.0.0
 url = "2.2.2"
