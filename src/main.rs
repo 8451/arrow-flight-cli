@@ -10,9 +10,10 @@ use std::sync::Arc;
 use arrow::csv::{Writer, WriterBuilder};
 use arrow::datatypes::Schema;
 
+use arrow::record_batch::RecordBatch;
 use arrow_flight::flight_service_client::FlightServiceClient;
 use arrow_flight::utils::flight_data_to_arrow_batch;
-use arrow_flight::{Criteria, FlightDescriptor, Ticket};
+use arrow_flight::{Criteria, FlightDescriptor, FlightInfo, Ticket};
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
 use oauth2::AccessToken;
@@ -82,11 +83,23 @@ enum Commands {
     GetFlightInfo {
         #[clap(value_parser)]
         query: String,
+        #[clap(
+            short = 'q',
+            long = "query",
+            help = "Use an SQL Query instead of a table name"
+        )]
+        is_cmd: bool,
     },
     /// DEBUG: Get Schema of a path
     GetSchema {
         #[clap(value_parser)]
         query: String,
+        #[clap(
+            short = 'q',
+            long = "query",
+            help = "Use an SQL Query instead of a table name"
+        )]
+        is_cmd: bool,
     },
     /// DEBUG: Get data for a specific Flight Ticket
     DoGet {
@@ -100,11 +113,13 @@ enum Commands {
         #[clap(value_parser, short = 'f')]
         file_path: String,
         #[clap(
+            value_enum,
             short = 'o',
-            long = "parquet",
-            help = "Save incoming data as a parquet"
+            long = "format",
+            help = "Output file format",
+            default_value = "csv"
         )]
-        save_as_parquet: bool,
+        file_format: DataFileFormat,
         #[clap(
             short = 'q',
             long = "query",
@@ -206,17 +221,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
             Ok(())
         }
-        Commands::GetFlightInfo { query } => {
+        Commands::GetFlightInfo { query, is_cmd } => {
             let mut client = connect_to_flight_server(&cfg).await?;
-            let fd = FlightDescriptor::new_path(vec![query.to_owned()]);
+            let fd = create_flight_descriptor(query.clone(), is_cmd);
             println!("Flight Descriptor: {:?}", fd);
             let flight_info = client.get_flight_info(fd).await?;
             println!("Flight info: {}", flight_info.into_inner());
             Ok(())
         }
-        Commands::GetSchema { query } => {
+        Commands::GetSchema { query, is_cmd } => {
             let mut client = connect_to_flight_server(&cfg).await?;
-            let fd = FlightDescriptor::new_path(vec![query.to_owned()]);
+            let fd = create_flight_descriptor(query.clone(), is_cmd);
             let flight_info = client.get_flight_info(fd).await?.into_inner();
             let schema = Schema::try_from(flight_info)?;
             println!("Schema: {:?}", schema);
@@ -236,81 +251,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Commands::GetData {
             query,
             file_path,
-            save_as_parquet,
+            file_format,
             is_cmd,
         } => {
             let mut client = connect_to_flight_server(&cfg).await?;
-            let fd = match *is_cmd {
-                true => FlightDescriptor::new_cmd(query.to_owned().into_bytes()),
-                false => FlightDescriptor::new_path(vec![query.to_owned()]),
-            };
+            let fd = create_flight_descriptor(query.clone(), is_cmd);
             println!("Flight Descriptor: {:?}", fd);
 
             let flight_info = client.get_flight_info(fd).await?.into_inner();
             let schema = Schema::try_from(flight_info.clone())?;
 
-            let mut csv_writer: Option<Writer<File>> = if !*save_as_parquet {
-                let file = File::create(file_path)?;
-                Some(WriterBuilder::new().build(file))
-            } else {
-                None
-            };
-            let mut parquet_writer: Option<ArrowWriter<File>> = if *save_as_parquet {
-                let props = WriterProperties::builder()
-                    .set_compression(Compression::SNAPPY)
-                    .build();
-                let file = File::create(file_path)?;
-                Some(ArrowWriter::try_new(file, schema.into(), Some(props))?)
-            } else {
-                None
+            let writer: Box<dyn FileWriter> = match file_format {
+                DataFileFormat::Csv => {
+                    let file = File::create(file_path)?;
+                    Box::new(WriterBuilder::new().build(file))
+                }
+                DataFileFormat::Parquet => {
+                    let props = WriterProperties::builder()
+                        .set_compression(Compression::SNAPPY)
+                        .build();
+                    let file = File::create(file_path)?;
+                    Box::new(ArrowWriter::try_new(file, schema.into(), Some(props))?)
+                }
             };
 
             println!("Found {} endpoints", flight_info.endpoint.len());
 
-            let stdout = io::stdout();
-            let mut handle = stdout.lock();
+            get_data(flight_info, writer, client).await?;
 
-            let mut endpoint_count = 0;
-            for endpoint in flight_info.endpoint {
-                let ticket = endpoint.ticket;
-                if let Some(ticket) = ticket {
-                    let mut stream = client.do_get(ticket).await?.into_inner();
-                    let schema_data = stream.message().await?;
-                    let schema = if let Some(schema) = schema_data {
-                        Arc::new(Schema::try_from(&schema)?)
-                    } else {
-                        break;
-                    };
-                    let mut batch_count: u64 = 0;
-                    let dictionaries_by_field = HashMap::new();
-                    while let Some(flight_data) = stream.message().await? {
-                        let record_batch = flight_data_to_arrow_batch(
-                            &flight_data,
-                            schema.clone(),
-                            &dictionaries_by_field,
-                        )?;
-
-                        batch_count += 1;
-                        write!(handle, "\rProcessed {} batches", batch_count)?;
-
-                        if let Some(ref mut writer) = csv_writer {
-                            writer.write(&record_batch)?
-                        } else if let Some(ref mut writer) = parquet_writer {
-                            writer.write(&record_batch)?
-                        }
-                    }
-
-                    write!(
-                        handle,
-                        "\nCompleted batches for endpoint {}\n",
-                        endpoint_count
-                    )?;
-                    endpoint_count += 1;
-                }
-            }
-            if let Some(writer) = parquet_writer {
-                writer.close()?;
-            }
             Ok(())
         }
         Commands::SendData {
@@ -320,6 +288,52 @@ async fn main() -> Result<(), Box<dyn Error>> {
             "Send Data not yet implemented",
         ))?),
     }
+}
+
+async fn get_data(
+    flight_info: FlightInfo,
+    mut writer: Box<dyn FileWriter>,
+    mut client: FlightServiceClient<InterceptedService<Channel, OAuth2Interceptor>>,
+) -> Result<(), Box<dyn Error>> {
+    let stdout = io::stdout();
+    let mut handle = stdout.lock();
+
+    let mut endpoint_count = 0;
+    for endpoint in flight_info.endpoint {
+        let ticket = endpoint.ticket;
+        if let Some(ticket) = ticket {
+            let mut stream = client.do_get(ticket).await?.into_inner();
+            let schema_data = stream.message().await?;
+            let schema = if let Some(schema) = schema_data {
+                Arc::new(Schema::try_from(&schema)?)
+            } else {
+                break;
+            };
+            let mut batch_count: u64 = 0;
+            let dictionaries_by_field = HashMap::new();
+            while let Some(flight_data) = stream.message().await? {
+                let record_batch = flight_data_to_arrow_batch(
+                    &flight_data,
+                    schema.clone(),
+                    &dictionaries_by_field,
+                )?;
+
+                batch_count += 1;
+                write!(handle, "\rProcessed {} batches", batch_count)?;
+
+                writer.write_file(&record_batch)?;
+            }
+
+            write!(
+                handle,
+                "\nCompleted batches for endpoint {}\n",
+                endpoint_count
+            )?;
+            endpoint_count += 1;
+        }
+    }
+    writer.close_writer()?;
+    Ok(())
 }
 
 async fn connect_to_flight_server(
@@ -355,6 +369,14 @@ async fn connect_to_flight_server(
     ))
 }
 
+fn create_flight_descriptor(query: String, is_cmd: &bool) -> FlightDescriptor {
+    if *is_cmd {
+        FlightDescriptor::new_cmd(query.into_bytes())
+    } else {
+        FlightDescriptor::new_path(vec![query])
+    }
+}
+
 /// Check if CLI Values override any of the cfg values. (Consumes config)
 fn merge_cfg_and_options(config: ConnectionConfig, cli: &Cli) -> ConnectionConfig {
     let address = match &cli.address {
@@ -377,4 +399,36 @@ fn merge_cfg_and_options(config: ConnectionConfig, cli: &Cli) -> ConnectionConfi
         scope,
         tls,
     }
+}
+
+trait FileWriter {
+    fn write_file(&mut self, record_batch: &RecordBatch) -> Result<(), Box<dyn Error>>;
+    fn close_writer(self: Box<Self>) -> Result<(), Box<dyn Error>>;
+}
+
+impl FileWriter for ArrowWriter<File> {
+    fn write_file(&mut self, record_batch: &RecordBatch) -> Result<(), Box<dyn Error>> {
+        self.write(record_batch)?;
+        Ok(())
+    }
+    fn close_writer(self: Box<Self>) -> Result<(), Box<dyn Error>> {
+        self.close()?;
+        Ok(())
+    }
+}
+
+impl FileWriter for Writer<File> {
+    fn write_file(&mut self, record_batch: &RecordBatch) -> Result<(), Box<dyn Error>> {
+        self.write(record_batch)?;
+        Ok(())
+    }
+    fn close_writer(self: Box<Self>) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    } // CSV Writer does not implement close
+}
+
+#[derive(Serialize, Deserialize, Debug, clap::ValueEnum, Clone)]
+enum DataFileFormat {
+    Csv,
+    Parquet,
 }
