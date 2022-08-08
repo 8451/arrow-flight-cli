@@ -261,21 +261,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let flight_info = client.get_flight_info(fd).await?.into_inner();
             let schema = Schema::try_from(flight_info.clone())?;
 
-            let writer = match file_format {
+            let writer: Box<dyn FileWriter> = match file_format {
                 DataFileFormat::Csv => {
                     let file = File::create(file_path)?;
-                    FileWriterObject {
-                        writer: Box::new(WriterBuilder::new().build(file)),
-                    }
+                    Box::new(WriterBuilder::new().build(file))
                 }
                 DataFileFormat::Parquet => {
                     let props = WriterProperties::builder()
                         .set_compression(Compression::SNAPPY)
                         .build();
                     let file = File::create(file_path)?;
-                    FileWriterObject {
-                        writer: Box::new(ArrowWriter::try_new(file, schema.into(), Some(props))?),
-                    }
+                    Box::new(ArrowWriter::try_new(file, schema.into(), Some(props))?)
                 }
             };
 
@@ -296,11 +292,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 async fn get_data(
     flight_info: FlightInfo,
-    writer: FileWriterObject,
+    mut writer: Box<dyn FileWriter>,
     mut client: FlightServiceClient<InterceptedService<Channel, OAuth2Interceptor>>,
 ) -> Result<(), Box<dyn Error>> {
-    let mut writer = writer.writer;
-
     let stdout = io::stdout();
     let mut handle = stdout.lock();
 
@@ -376,9 +370,10 @@ async fn connect_to_flight_server(
 }
 
 fn create_flight_descriptor(query: String, is_cmd: &bool) -> FlightDescriptor {
-    match *is_cmd {
-        true => FlightDescriptor::new_cmd(query.into_bytes()),
-        false => FlightDescriptor::new_path(vec![query]),
+    if *is_cmd {
+        FlightDescriptor::new_cmd(query.into_bytes())
+    } else {
+        FlightDescriptor::new_path(vec![query])
     }
 }
 
@@ -430,10 +425,6 @@ impl FileWriter for Writer<File> {
     fn close_writer(self: Box<Self>) -> Result<(), Box<dyn Error>> {
         Ok(())
     } // CSV Writer does not implement close
-}
-
-struct FileWriterObject {
-    writer: Box<dyn FileWriter>,
 }
 
 #[derive(Serialize, Deserialize, Debug, clap::ValueEnum, Clone)]
