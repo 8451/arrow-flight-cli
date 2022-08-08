@@ -33,8 +33,21 @@ use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 #[clap(author, version, about, long_about = None)]
 #[clap(propagate_version = true)]
 pub struct Cli {
-    #[clap(long = "verbose")]
+    #[clap(long = "verbose", short = 'v')]
     verbose: bool, // Not currently implemented
+
+    // The following are options that override the values in the config
+    /// Use TLS for request (If used with self-server, sets TLS use to default)
+    #[clap(long = "tls", short = 't')]
+    tls: bool,
+
+    /// Provide server instead of using config value
+    #[clap(long = "server", short = 's')]
+    address: Option<String>,
+
+    /// Provide OAuth Provider instead of using config value
+    #[clap(long = "provider", short = 'i', value_enum)]
+    identity_provider: Option<IdentityProvider>,
 
     #[clap(subcommand)]
     command: Commands,
@@ -45,7 +58,9 @@ enum Commands {
     /// Add a Flight Server to your config.
     SetServer {
         #[clap(value_parser)]
-        server_address: Option<String>,
+        server_address: String,
+        #[clap(long = "tls", short = 't')]
+        tls: bool
     },
     /// Set OAuth Provider (Azure, Github, Google, Default: None)
     SetOauthProvider {
@@ -97,6 +112,7 @@ enum Commands {
 pub struct ConnectionConfig {
     address: String,
     identity_provider: IdentityProvider,
+    tls: bool
 }
 
 impl Default for ConnectionConfig {
@@ -104,6 +120,7 @@ impl Default for ConnectionConfig {
         Self {
             address: "".into(),
             identity_provider: IdentityProvider::None,
+            tls: false
         }
     }
 }
@@ -112,33 +129,34 @@ impl Default for ConnectionConfig {
 async fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
     let cfg: ConnectionConfig = confy::load("flight-cli")?;
+    let tls_flag: &bool = &cli.tls;
+
+    let cfg = merge_cfg_and_options(cfg, &cli);
 
     match &cli.command {
-        Commands::SetServer { server_address } => {
-            match server_address {
-                Some(address) => {
-                    let new_cfg = ConnectionConfig {
-                        address: address.to_owned(),
-                        identity_provider: cfg.identity_provider,
-                    };
-                    // Test server connection before changing config
-                    let client = connect_to_flight_server(&new_cfg).await;
-                    match client {
-                        Ok(_) => {
-                            confy::store("flight-cli", &new_cfg)?;
-                            println!("Changed flight server to {}", new_cfg.address);
-                            Ok(())
-                        }
-                        Err(e) => Err(e.into()),
-                    }
+        Commands::SetServer { server_address, tls } => {
+            let tls = *tls || *tls_flag; // User can use global option or subcommand flag to set to TLS
+            let new_cfg = ConnectionConfig {
+                address: server_address.to_owned(),
+                identity_provider: cfg.identity_provider,
+                tls
+            };
+            // Test server connection before changing config
+            let client = connect_to_flight_server(&new_cfg).await;
+            match client {
+                Ok(_) => {
+                    confy::store("flight-cli", &new_cfg)?;
+                    println!("Changed flight server to {}", new_cfg.address);
+                    Ok(())
                 }
-                None => Err("No Server Address Provided".into()),
+                Err(e) => Err(e.into()),
             }
-        }
+        },
         Commands::SetOauthProvider { provider } => {
             let new_cfg = ConnectionConfig {
                 address: cfg.address,
-                identity_provider: provider.to_owned()
+                identity_provider: provider.to_owned(),
+                tls: cfg.tls
             };
             confy::store("flight-cli", &new_cfg)?;
             println!("Set OAuth Provider to {:?}!", provider);
@@ -200,8 +218,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         } => {
             let mut client = connect_to_flight_server(&cfg).await?;
             let fd = match *is_cmd {
-                true => FlightDescriptor::new_path(vec![query.to_owned()]),
-                false => FlightDescriptor::new_cmd(query.to_owned().into_bytes())
+                true => FlightDescriptor::new_cmd(query.to_owned().into_bytes()),
+                false => FlightDescriptor::new_path(vec![query.to_owned()])
             };
             println!("Flight Descriptor: {:?}", fd);
 
@@ -278,7 +296,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn connect_to_flight_server(
-    config: &ConnectionConfig,
+    config: &ConnectionConfig
 ) -> Result<FlightServiceClient<InterceptedService<Channel, OAuth2Interceptor>>, Box<dyn Error>> {
     let token = match config.identity_provider {
         IdentityProvider::Azure => azure_authorization().await?,
@@ -286,11 +304,37 @@ async fn connect_to_flight_server(
         IdentityProvider::Github => return Err(Box::try_from(Status::unimplemented("Github Auth not yet implemented"))?),
         IdentityProvider::None => AccessToken::new("".parse()?)
     };
-    let channel = Endpoint::from_str(&*config.address)?.tls_config(ClientTlsConfig::new())?.connect().await?;
+    let channel = if config.tls {
+        Endpoint::from_str(&*config.address)?.tls_config(ClientTlsConfig::new())?.connect().await?
+    } else {
+        Endpoint::from_str(&*config.address)?.connect().await?
+    };
     Ok(FlightServiceClient::with_interceptor(
         channel,
         OAuth2Interceptor {
             access_token: token.secret().clone(),
         }
     ))
+}
+
+/// Check if CLI Values override any of the cfg values. (Consumes config)
+fn merge_cfg_and_options(config: ConnectionConfig, cli: &Cli) -> ConnectionConfig {
+    let address = match &cli.address {
+        Some(address) => address.to_owned(),
+        None => config.address.to_owned()
+    };
+    let identity_provider = match &cli.identity_provider {
+        Some(provider) => provider.to_owned(),
+        None => config.identity_provider.to_owned()
+    };
+    let tls = if config.tls != cli.tls {
+        cli.tls
+    } else {
+        config.tls
+    };
+    ConnectionConfig {
+        address,
+        identity_provider,
+        tls
+    }
 }
