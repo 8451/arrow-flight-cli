@@ -74,7 +74,9 @@ pub async fn authorize(
     } else {
         let refresh_token = stored_token.1;
         match identity_provider {
-            IdentityProvider::Azure => Ok(azure::azure_authorize(scope.to_string(), refresh_token).await?),
+            IdentityProvider::Azure => {
+                Ok(azure::azure_authorize(scope.to_string(), refresh_token).await?)
+            }
             _ => Err(Box::new(CliError::new(
                 "Identity Provider not currently implemented!".to_string(),
             ))),
@@ -98,7 +100,7 @@ fn check_stored_token(
 }
 
 fn store_access_token(
-    access_token: AccessToken,
+    access_token: &AccessToken,
     expires_in: Option<core::time::Duration>,
     refresh_token: Option<&RefreshToken>,
     id_provider: IdentityProvider,
@@ -112,14 +114,14 @@ fn store_access_token(
     };
     let new_store = if let Some(refresh_token) = refresh_token {
         AuthStore {
-            token: access_token,
+            token: access_token.to_owned(),
             expiry_time,
             identity_provider: id_provider,
             refresh_token: refresh_token.to_owned(),
         }
     } else {
         AuthStore {
-            token: access_token,
+            token: access_token.to_owned(),
             expiry_time,
             identity_provider: id_provider,
             refresh_token: RefreshToken::new("".to_string()),

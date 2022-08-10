@@ -21,7 +21,7 @@ pub async fn azure_authorize(
             Err(e) => eprintln!("{}", e),
         }
     }
-    Ok(azure_browser_authorization(scope, client_id, tenant_id).await?)
+    azure_browser_authorization(scope, client_id, tenant_id).await
 }
 
 async fn azure_browser_authorization(
@@ -45,8 +45,9 @@ async fn azure_browser_authorization(
 
     // Exchange the token with one that can be used for authorization
     let tr = c.exchange(code).await?;
+    let access_token = AccessToken::new(tr.access_token().secret().to_string());
     store_access_token(
-        tr.access_token().to_owned(),
+        &access_token,
         tr.expires_in(),
         tr.refresh_token(),
         IdentityProvider::Azure,
@@ -59,7 +60,7 @@ async fn azure_refresh_authorization(
     client_id: &ClientId,
     tenant_id: &String,
 ) -> Result<AccessToken, Box<dyn Error>> {
-    let refresh_token = AccessToken::new(refresh_token.secret().to_string());
+    let refresh_token = azure_core::auth::AccessToken::new(refresh_token.secret().to_string());
     let client = azure_core::new_http_client();
     let tr = azure_identity::refresh_token::exchange(
         client,
@@ -71,11 +72,12 @@ async fn azure_refresh_authorization(
     .await?;
     let refresh_token = RefreshToken::new(tr.refresh_token().secret().to_string());
     let expires_in = std::time::Duration::from_secs(tr.expires_in());
+    let access_token = AccessToken::new(tr.access_token().secret().to_string());
     store_access_token(
-        tr.access_token().to_owned(),
+        &access_token,
         Some(expires_in),
         Some(&refresh_token),
         IdentityProvider::Azure,
     )?;
-    Ok(tr.access_token().to_owned())
+    Ok(access_token)
 }
