@@ -94,7 +94,9 @@ enum Commands {
         #[clap(value_parser, short = 'k', long = "private-key")]
         private_key_path: Option<String>,
     },
+    /// Clear TLS certificates from saved config
     ClearTlsCerts {
+        /// Disable TLS
         #[clap(long = "disable-tls", short = 'd')]
         disable_tls: bool,
     },
