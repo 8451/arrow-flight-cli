@@ -20,13 +20,13 @@ use oauth2::AccessToken;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
-use std::io;
 use std::io::Write;
+use std::{fs, io};
 
 use crate::auth::{azure_authorization, IdentityProvider, OAuth2Interceptor};
 use serde::{Deserialize, Serialize};
 use tonic::codegen::InterceptedService;
-use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 use tonic::Status;
 
 #[derive(Parser)]
@@ -40,6 +40,18 @@ pub struct Cli {
     /// Use TLS for request (If used with self-server, sets TLS use to default)
     #[clap(long = "tls", short = 't')]
     tls: bool,
+
+    /// Provide path to root CA instead of using config value (Must be used with args client-certificate & private-key)
+    #[clap(long = "ca-certificate")]
+    ca_certificate_path: Option<String>,
+
+    /// Provide path to client certificate instead of using config value (Must be used with args ca-certificate & private-key)
+    #[clap(long = "client-certificate")]
+    client_certificate_path: Option<String>,
+
+    /// Provide path to private key instead of using config value (Must be used with args ca-certificate & client-certificate)
+    #[clap(long = "private-key")]
+    private_key_path: Option<String>,
 
     /// Provide server instead of using config value
     #[clap(long = "server", short = 's')]
@@ -72,6 +84,21 @@ enum Commands {
         provider: IdentityProvider,
         #[clap(value_parser)]
         scope: String,
+    },
+    /// Set your own root CA and/or use self-signed certificates
+    SetTlsCerts {
+        #[clap(value_parser)]
+        ca_cert_path: String,
+        #[clap(value_parser, short = 'c', long = "client-cert")]
+        client_cert_path: Option<String>,
+        #[clap(value_parser, short = 'k', long = "private-key")]
+        private_key_path: Option<String>,
+    },
+    /// Clear TLS certificates from saved config
+    ClearTlsCerts {
+        /// Disable TLS
+        #[clap(long = "disable-tls", short = 'd')]
+        disable_tls: bool,
     },
     /// Get the current server in the config
     CurrentServer,
@@ -142,6 +169,7 @@ pub struct ConnectionConfig {
     identity_provider: IdentityProvider,
     scope: String,
     tls: bool,
+    tls_certs: Option<TlsCertPaths>,
 }
 
 impl Default for ConnectionConfig {
@@ -151,6 +179,7 @@ impl Default for ConnectionConfig {
             identity_provider: IdentityProvider::None,
             scope: "".into(),
             tls: false,
+            tls_certs: None,
         }
     }
 }
@@ -174,6 +203,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 identity_provider: cfg.identity_provider,
                 scope: cfg.scope,
                 tls,
+                tls_certs: None,
             };
             // Test server connection before changing config
             let client = connect_to_flight_server(&new_cfg).await;
@@ -192,12 +222,44 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 identity_provider: provider.to_owned(),
                 scope: scope.to_owned(),
                 tls: cfg.tls,
+                tls_certs: None,
             };
             confy::store("flight-cli", &new_cfg)?;
             println!(
                 "Set OAuth Provider to {:?} with scope \"{}\"",
                 provider, scope
             );
+            Ok(())
+        }
+        Commands::SetTlsCerts {
+            ca_cert_path,
+            client_cert_path,
+            private_key_path,
+        } => {
+            let tls_paths = TlsCertPaths {
+                ca_crt: ca_cert_path.to_owned(),
+                client_crt: client_cert_path.to_owned(),
+                private_key: private_key_path.to_owned(),
+            };
+            let new_cfg = ConnectionConfig {
+                address: cfg.address,
+                identity_provider: cfg.identity_provider,
+                scope: cfg.scope,
+                tls: true,
+                tls_certs: Some(tls_paths),
+            };
+            confy::store("flight-cli", &new_cfg)?;
+            Ok(())
+        }
+        Commands::ClearTlsCerts { disable_tls } => {
+            let new_cfg = ConnectionConfig {
+                address: cfg.address,
+                identity_provider: cfg.identity_provider,
+                scope: cfg.scope,
+                tls: !*disable_tls,
+                tls_certs: None,
+            };
+            confy::store("flight-cli", &new_cfg)?;
             Ok(())
         }
         Commands::CurrentServer => {
@@ -354,10 +416,36 @@ async fn connect_to_flight_server(
         IdentityProvider::None => AccessToken::new("".parse()?),
     };
     let channel = if config.tls {
-        Endpoint::from_str(&*config.address)?
-            .tls_config(ClientTlsConfig::new())?
-            .connect()
-            .await?
+        if let Some(tls_paths) = &config.tls_certs {
+            let ca_cert = Certificate::from_pem(fs::read_to_string(&tls_paths.ca_crt)?);
+            // A user can use root CA without having client certs, but a private key should exist if client_cert exists
+            let client_identity = if let (Some(client_cert), Some(private_key)) =
+                (&tls_paths.client_crt, &tls_paths.private_key)
+            {
+                let client_cert = fs::read_to_string(client_cert)?;
+                let private_key = fs::read_to_string(&private_key)?;
+                Some(Identity::from_pem(client_cert, private_key))
+            } else {
+                None
+            };
+            let tls_config = if let Some(client_identity) = client_identity {
+                ClientTlsConfig::new()
+                    .ca_certificate(ca_cert)
+                    .identity(client_identity)
+            } else {
+                ClientTlsConfig::new().ca_certificate(ca_cert)
+            };
+            Endpoint::from_str(&*config.address)?
+                .tls_config(tls_config)?
+                .connect()
+                .await?
+        } else {
+            // Use root CA from OS
+            Endpoint::from_str(&*config.address)?
+                .tls_config(ClientTlsConfig::new())?
+                .connect()
+                .await?
+        }
     } else {
         Endpoint::from_str(&*config.address)?.connect().await?
     };
@@ -391,6 +479,31 @@ fn merge_cfg_and_options(config: ConnectionConfig, cli: &Cli) -> ConnectionConfi
         Some(scope) => scope.to_owned(),
         None => config.scope.to_owned(),
     };
+    let tls_certs = {
+        let mut result = if let Some(config) = &config.tls_certs {
+            TlsCertPaths {
+                ca_crt: config.ca_crt.to_owned(),
+                client_crt: config.client_crt.to_owned(),
+                private_key: config.private_key.to_owned(),
+            }
+        } else {
+            TlsCertPaths {
+                ca_crt: "".to_string(),
+                client_crt: None,
+                private_key: None,
+            }
+        };
+        if let Some(ca_crt) = &cli.ca_certificate_path {
+            result.ca_crt = ca_crt.to_owned();
+        }
+        if let Some(client_crt) = &cli.client_certificate_path {
+            result.client_crt = Some(client_crt.to_owned());
+        }
+        if let Some(private_key) = &cli.private_key_path {
+            result.private_key = Some(private_key.to_owned());
+        }
+        Some(result)
+    };
     // TLS will always be true if CLI option set, but could be true or false if not set
     let tls = if cli.tls { true } else { config.tls };
     ConnectionConfig {
@@ -398,6 +511,7 @@ fn merge_cfg_and_options(config: ConnectionConfig, cli: &Cli) -> ConnectionConfi
         identity_provider,
         scope,
         tls,
+        tls_certs,
     }
 }
 
@@ -431,4 +545,12 @@ impl FileWriter for Writer<File> {
 enum DataFileFormat {
     Csv,
     Parquet,
+}
+
+/// A struct holding the paths to different TLS certs, for if a user doesn't want to use default certs
+#[derive(Serialize, Deserialize, Debug)]
+struct TlsCertPaths {
+    ca_crt: String,
+    client_crt: Option<String>,
+    private_key: Option<String>,
 }
