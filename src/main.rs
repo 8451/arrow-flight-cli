@@ -397,7 +397,7 @@ async fn get_data(
             while let Some(flight_data) = stream.message().await? {
                 let record_batch = flight_data_to_arrow_batch(
                     &flight_data,
-                    schema.clone(),
+                    Arc::clone(&schema),
                     &dictionaries_by_field,
                 )?;
 
