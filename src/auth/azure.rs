@@ -60,6 +60,7 @@ async fn azure_refresh_authorization(
     client_id: &ClientId,
     tenant_id: &String,
 ) -> Result<AccessToken, Box<dyn Error>> {
+    println!("Access Token expired. Attempting refresh...");
     let refresh_token = azure_core::auth::AccessToken::new(refresh_token.secret().to_string());
     let client = azure_core::new_http_client();
     let tr = azure_identity::refresh_token::exchange(
