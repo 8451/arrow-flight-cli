@@ -19,20 +19,20 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
+mod azure;
 
 use crate::errors::CliError;
-use azure_identity::{authorization_code_flow, development};
-use chrono::{DateTime, Utc};
-use oauth2::basic::BasicTokenType;
-use oauth2::{AccessToken, ClientId, EmptyExtraTokenFields, StandardTokenResponse, TokenResponse};
+
+use chrono::{DateTime, Duration, Utc};
+
+use oauth2::{AccessToken, RefreshToken};
 use serde::{Deserialize, Serialize};
-use std::env;
+
 use std::error::Error;
 use std::str::FromStr;
 use tonic::metadata::MetadataValue;
 use tonic::service::Interceptor;
 use tonic::{Request, Status};
-use url::Url;
 
 #[derive(Serialize, Deserialize, Debug, clap::ValueEnum, Clone, PartialEq)]
 pub enum IdentityProvider {
@@ -42,7 +42,7 @@ pub enum IdentityProvider {
     Github,
     /// UNIMPLEMENTED: Google Auth
     Google,
-    /// Do not use OAuth2
+    /// Skip OAuth2
     None,
 }
 
@@ -64,63 +64,68 @@ impl FromStr for IdentityProvider {
     }
 }
 
-pub async fn azure_authorization(scope: String) -> Result<AccessToken, Box<dyn Error>> {
-    let stored_token = check_stored_token(IdentityProvider::Azure)?;
-    if let Some(token) = stored_token {
-        Ok(token)
+pub async fn authorize(
+    identity_provider: &IdentityProvider,
+    scope: &String,
+) -> Result<AccessToken, Box<dyn Error>> {
+    let stored_token = check_stored_token(identity_provider)?;
+    if let Some(access_token) = stored_token.0 {
+        Ok(access_token)
     } else {
-        let client_id = ClientId::new(
-            env::var("OAUTH_CLIENT_ID").expect("Missing CLIENT_ID environment variable."),
-        );
-        let tenant_id =
-            env::var("AZURE_TENANT_ID").expect("Missing TENANT_ID environment variable.");
-        let c = authorization_code_flow::start(
-            client_id,
-            None,
-            &tenant_id,
-            Url::parse("http://localhost:47471")?,
-            &*scope,
-        );
-        println!("\nOpen this URL in a browser:\n{}", c.authorize_url);
-
-        // Using a naive, blocking redirect server is fine for our case, as it should block anyway
-        let code = development::naive_redirect_server(&c, 47471)?;
-
-        // Exchange the token with one that can be used for authorization
-        let token = c.exchange(code).await?;
-        store_access_token(&token, IdentityProvider::Azure)?;
-        Ok(token.access_token().to_owned())
+        let refresh_token = stored_token.1;
+        match identity_provider {
+            IdentityProvider::Azure => Ok(azure::azure_authorize(scope.to_string(), refresh_token).await?),
+            _ => Err(Box::new(CliError::new(
+                "Identity Provider not currently implemented!".to_string(),
+            ))),
+        }
     }
 }
 
-fn check_stored_token(provider: IdentityProvider) -> Result<Option<AccessToken>, Box<dyn Error>> {
+fn check_stored_token(
+    provider: &IdentityProvider,
+) -> Result<(Option<AccessToken>, Option<RefreshToken>), Box<dyn Error>> {
     let store: AuthStore = confy::load("flight-cli-auth")?;
-    if !store.token.secret().to_string().eq("") && store.identity_provider == provider {
+    if !store.token.secret().to_string().eq("") && store.identity_provider == *provider {
         let current_time = Utc::now();
         if store.expiry_time > current_time {
-            return Ok(Some(store.token));
+            return Ok((Some(store.token), None));
+        } else if !store.refresh_token.secret().eq("") {
+            return Ok((None, Some(store.refresh_token)));
         }
     }
-    Ok(None)
+    Ok((None, None))
 }
 
 fn store_access_token(
-    token_response: &StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>,
+    access_token: AccessToken,
+    expires_in: Option<core::time::Duration>,
+    refresh_token: Option<&RefreshToken>,
     id_provider: IdentityProvider,
 ) -> Result<(), Box<dyn Error>> {
-    let expires_in = token_response.expires_in();
     let expiry_time = if let Some(token_duration) = expires_in {
-        let token_duration = chrono::Duration::from_std(token_duration)?;
+        let token_duration = Duration::from_std(token_duration)?;
         Utc::now() + token_duration
     } else {
-        // If there isn't an expires_in, just set expiry time to now so it'll get new credentials next time
+        // If there isn't an expires_in, just set expiry time to now so it'll get new credentials/refresh next time
         Utc::now()
     };
-    let new_store = AuthStore {
-        token: token_response.access_token().to_owned(),
-        expiry_time,
-        identity_provider: id_provider,
+    let new_store = if let Some(refresh_token) = refresh_token {
+        AuthStore {
+            token: access_token,
+            expiry_time,
+            identity_provider: id_provider,
+            refresh_token: refresh_token.to_owned(),
+        }
+    } else {
+        AuthStore {
+            token: access_token,
+            expiry_time,
+            identity_provider: id_provider,
+            refresh_token: RefreshToken::new("".to_string()),
+        }
     };
+
     confy::store("flight-cli-auth", &new_store)?;
     Ok(())
 }
@@ -145,6 +150,7 @@ pub struct AuthStore {
     token: AccessToken,
     expiry_time: DateTime<Utc>,
     identity_provider: IdentityProvider,
+    refresh_token: RefreshToken,
 }
 
 impl Default for AuthStore {
@@ -153,6 +159,7 @@ impl Default for AuthStore {
             token: AccessToken::new("".to_string()),
             expiry_time: DateTime::<Utc>::MIN_UTC,
             identity_provider: IdentityProvider::None,
+            refresh_token: RefreshToken::new("".to_string()),
         }
     }
 }
