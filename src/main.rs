@@ -38,14 +38,13 @@ use arrow_flight::utils::flight_data_to_arrow_batch;
 use arrow_flight::{Criteria, FlightDescriptor, FlightInfo, Ticket};
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
-use oauth2::AccessToken;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 use std::io::Write;
 use std::{fs, io};
 
-use crate::auth::{azure_authorization, IdentityProvider, OAuth2Interceptor};
+use crate::auth::{authorize, IdentityProvider, OAuth2Interceptor};
 use serde::{Deserialize, Serialize};
 use tonic::codegen::InterceptedService;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
@@ -398,7 +397,7 @@ async fn get_data(
             while let Some(flight_data) = stream.message().await? {
                 let record_batch = flight_data_to_arrow_batch(
                     &flight_data,
-                    schema.clone(),
+                    Arc::clone(&schema),
                     &dictionaries_by_field,
                 )?;
 
@@ -423,20 +422,7 @@ async fn get_data(
 async fn connect_to_flight_server(
     config: &ConnectionConfig,
 ) -> Result<FlightServiceClient<InterceptedService<Channel, OAuth2Interceptor>>, Box<dyn Error>> {
-    let token = match config.identity_provider {
-        IdentityProvider::Azure => azure_authorization(config.scope.to_owned()).await?,
-        IdentityProvider::Google => {
-            return Err(Box::try_from(Status::unimplemented(
-                "Google Auth not yet implemented",
-            ))?)
-        }
-        IdentityProvider::Github => {
-            return Err(Box::try_from(Status::unimplemented(
-                "Github Auth not yet implemented",
-            ))?)
-        }
-        IdentityProvider::None => AccessToken::new("".parse()?),
-    };
+    let token = authorize(&config.identity_provider, &config.scope).await?;
     let channel = if config.tls {
         if let Some(tls_paths) = &config.tls_certs {
             let ca_cert = Certificate::from_pem(fs::read_to_string(&tls_paths.ca_crt)?);
