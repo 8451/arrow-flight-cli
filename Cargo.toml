@@ -30,17 +30,17 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-arrow = "20.0.0"
-arrow-flight = "20.0.0"
-azure_core = "0.4.0"
-azure_identity = "0.5.0"
+arrow = "26.0.0"
+arrow-flight = "26.0.0"
+azure_core = "0.6.0"
+azure_identity = "0.7.0"
 chrono = "0.4.20"
-clap = { version = "3.2.13", features = ["derive"] }
-confy = "0.4.0"
+clap = { version = "4.0.18", features = ["derive"] }
+confy = "0.5.1"
 futures = "0.3.21"
 http = "0.2.8"
 oauth2 = "4.2.3"
-parquet = { version = "20.0.0", features = ["async"] }
+parquet = { version = "26.0.0", features = ["async"] }
 serde = { version = "1.0.140", features = ["derive"] }
 tokio = { version = "1.20.0", features = ["tokio-macros", "net"] }
 tonic = { version = "0.8.0", features = ["tls", "tls-roots"] }

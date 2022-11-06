@@ -44,7 +44,7 @@ async fn azure_browser_authorization(
     let code = development::naive_redirect_server(&c, 47471)?;
 
     // Exchange the token with one that can be used for authorization
-    let tr = c.exchange(code).await?;
+    let tr = c.exchange(azure_core::new_http_client(), code).await?;
     let access_token = AccessToken::new(tr.access_token().secret().to_string());
     store_access_token(
         &access_token,
