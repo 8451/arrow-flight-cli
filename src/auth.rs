@@ -67,15 +67,18 @@ impl FromStr for IdentityProvider {
 pub async fn authorize(
     identity_provider: &IdentityProvider,
     scope: &String,
-) -> Result<AccessToken, Box<dyn Error>> {
+) -> Result<Option<AccessToken>, Box<dyn Error>> {
     let stored_token = check_stored_token(identity_provider)?;
     if let Some(access_token) = stored_token.0 {
-        Ok(access_token)
+        Ok(Some(access_token))
     } else {
         let refresh_token = stored_token.1;
         match identity_provider {
             IdentityProvider::Azure => {
-                Ok(azure::azure_authorize(scope.to_string(), refresh_token).await?)
+                Ok(Some(azure::azure_authorize(scope.to_string(), refresh_token).await?))
+            },
+            IdentityProvider::None => {
+                Ok(None)
             }
             _ => Err(Box::new(CliError::new(
                 "Identity Provider not currently implemented!".to_string(),
@@ -87,7 +90,7 @@ pub async fn authorize(
 fn check_stored_token(
     provider: &IdentityProvider,
 ) -> Result<(Option<AccessToken>, Option<RefreshToken>), Box<dyn Error>> {
-    let store: AuthStore = confy::load("flight-cli-auth")?;
+    let store: AuthStore = confy::load("flight-cli", "auth-store")?;
     if !store.token.secret().to_string().eq("") && store.identity_provider == *provider {
         let current_time = Utc::now();
         if store.expiry_time > current_time {
@@ -128,24 +131,38 @@ fn store_access_token(
         }
     };
 
-    confy::store("flight-cli-auth", &new_store)?;
+    confy::store("flight-cli", "auth-store",&new_store)?;
     Ok(())
 }
 
 pub struct OAuth2Interceptor {
-    pub(crate) access_token: String,
+    pub(crate) access_token: Option<String>,
+}
+
+impl OAuth2Interceptor {
+    pub fn new(token: Option<AccessToken>) -> Self {
+        if let Some(access_token) = token {
+            Self { access_token: Some(access_token.secret().clone()) }
+        } else {
+            Self { access_token: None }
+        }
+    }
 }
 
 impl Interceptor for OAuth2Interceptor {
     fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
-        if !self.access_token.eq("") {
-            let new_token: MetadataValue<_> =
-                format!("Bearer {}", self.access_token).parse().unwrap();
-            request.metadata_mut().insert("authorization", new_token);
-        }
+        if let Some(access_token) = &self.access_token {
+            if access_token == "" {
+                let new_token: MetadataValue<_> =
+                    format!("Bearer {}", access_token).parse().unwrap();
+                request.metadata_mut().insert("authorization", new_token);
+            }
+        };
+
         Ok(request)
     }
 }
+
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AuthStore {

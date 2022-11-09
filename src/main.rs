@@ -205,10 +205,13 @@ impl Default for ConnectionConfig {
     }
 }
 
+static APP_NAME: &str = env!("CARGO_PKG_NAME");
+static CONFIG_NAME: &str = "server-cfg";
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
-    let cfg: ConnectionConfig = confy::load("flight-cli")?;
+    let cfg: ConnectionConfig = confy::load(APP_NAME, CONFIG_NAME)?;
     let tls_flag: &bool = &cli.tls;
 
     let cfg = merge_cfg_and_options(cfg, &cli);
@@ -230,7 +233,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let client = connect_to_flight_server(&new_cfg).await;
             match client {
                 Ok(_) => {
-                    confy::store("flight-cli", &new_cfg)?;
+                    confy::store(APP_NAME, CONFIG_NAME, &new_cfg)?;
                     println!("Changed flight server to {}", new_cfg.address);
                     Ok(())
                 }
@@ -245,7 +248,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 tls: cfg.tls,
                 tls_certs: None,
             };
-            confy::store("flight-cli", &new_cfg)?;
+            confy::store(APP_NAME, CONFIG_NAME, &new_cfg)?;
             println!(
                 "Set OAuth Provider to {:?} with scope \"{}\"",
                 provider, scope
@@ -269,7 +272,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 tls: true,
                 tls_certs: Some(tls_paths),
             };
-            confy::store("flight-cli", &new_cfg)?;
+            confy::store(APP_NAME, CONFIG_NAME, &new_cfg)?;
             Ok(())
         }
         Commands::ClearTlsCerts { disable_tls } => {
@@ -280,7 +283,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 tls: !*disable_tls,
                 tls_certs: None,
             };
-            confy::store("flight-cli", &new_cfg)?;
+            confy::store(APP_NAME, CONFIG_NAME, &new_cfg)?;
             Ok(())
         }
         Commands::CurrentServer => {
@@ -459,9 +462,7 @@ async fn connect_to_flight_server(
     };
     Ok(FlightServiceClient::with_interceptor(
         channel,
-        OAuth2Interceptor {
-            access_token: token.secret().clone(),
-        },
+        OAuth2Interceptor::new(token),
     ))
 }
 
